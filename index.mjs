@@ -236,33 +236,25 @@ async function resolvePostUrlFromCard(page, card) {
   const existing = card.postUrl || card.postUrlCandidates?.find((value) => canonicalizePostUrl(value));
   if (existing) return { record: card, resolvedUrl: canonicalizePostUrl(existing), method: "dom" };
 
-  const cardLocator = page.locator('div.feed-shared-update-v2, article, [role="article"], [role="listitem"]').filter({ hasText: card.text?.slice(0, 120) || "Feed post" }).first();
-  if (!(await cardLocator.isVisible().catch(() => false))) return { record: card, resolvedUrl: null, method: "unresolved" };
-
-  const menuButtons = cardLocator.locator([
-    'button[aria-label*="more" i]',
-    'button[aria-label*="options" i]',
-    'button[aria-label*="actions" i]',
-    'button[aria-label*="control menu" i]',
-    '[role="button"][aria-label*="more" i]',
-    '[role="button"][aria-label*="options" i]',
-  ].join(", "));
-  let menuButton = null;
-  for (let index = 0; index < await menuButtons.count().catch(() => 0); index += 1) {
-    const candidate = menuButtons.nth(index);
-    if (await candidate.isVisible().catch(() => false)) {
-      menuButton = candidate;
+  const authorNeedle = normalizeText(card.author?.name || "").replace(/\s+•\s+(?:1st|2nd|3rd|degree|following)$/i, "").trim().toLowerCase();
+  const menuButtons = page.locator('button[aria-label^="Open control menu for post by" i]');
+  const labels = await menuButtons.evaluateAll((elements) => elements.map((element) => element.getAttribute("aria-label") || "")).catch(() => []);
+  let selectedIndex = -1;
+  for (let index = 0; index < labels.length; index += 1) {
+    const label = labels[index].replace(/^open control menu for post by\s*/i, "").trim().toLowerCase();
+    if (await menuButtons.nth(index).isVisible().catch(() => false) && (!authorNeedle || label.includes(authorNeedle))) {
+      selectedIndex = index;
       break;
     }
   }
-  if (!menuButton) return { record: card, resolvedUrl: null, method: "unresolved" };
+  if (selectedIndex < 0) return { record: card, resolvedUrl: null, method: "unresolved" };
 
-  await menuButton.click({ timeout: 2_000 }).catch(() => undefined);
+  await menuButtons.nth(selectedIndex).click({ timeout: 2_000 }).catch(() => undefined);
   const menu = page.locator('[role="menu"], [role="listbox"]').last();
-  const copyItem = menu.locator('button, [role="menuitem"], li').filter({ hasText: /copy link(?: to post)?|copy link/i }).first();
+  const copyItem = menu.locator('button, [role="menuitem"], li, div').filter({ hasText: /copy link(?: to post)?|copy link/i }).first();
   if (!(await copyItem.isVisible().catch(() => false))) {
     await page.keyboard.press("Escape").catch(() => undefined);
-    return { record: card, resolvedUrl: null, method: "unresolved" };
+    return { record: card, resolvedUrl: null, method: "menu-no-copy-action" };
   }
 
   await copyItem.click({ timeout: 2_000 }).catch(() => undefined);
@@ -274,7 +266,7 @@ async function resolvePostUrlFromCard(page, card) {
   return {
     record: resolvedUrl ? { ...card, postUrl: resolvedUrl, postUrlCandidates: [...new Set([...(card.postUrlCandidates || []), resolvedUrl])] } : card,
     resolvedUrl,
-    method: resolvedUrl ? "copy-link-menu" : "unresolved",
+    method: resolvedUrl ? "copy-link-menu" : "copy-action-no-valid-url",
   };
 }
 
@@ -458,6 +450,8 @@ async function collect(options) {
     coverage.verifiedPostUrls = records.length - unresolvedUrls.length;
     coverage.unresolvedPostUrls = unresolvedUrls.length;
     if (invalid.length) coverage.gaps.push(`${invalid.length} records have no stable LinkedIn post URL or identifier.`);
+    if (options.resolveUrls && coverage.urlResolutionAttempts > 0 && coverage.urlResolutionMenuFound === 0) coverage.gaps.push("No visible post control menus matched; inspect the live page’s aria-labels or card container structure.");
+    if (options.resolveUrls && coverage.urlResolutionMenuFound > 0 && coverage.urlResolutionCopyActionFound === 0) coverage.gaps.push("Post control menus opened, but no Copy link action was visible.");
     if (!records.length) coverage.gaps.push("No feed records were extracted; the page may not have been signed in, loaded, or accessible.");
     coverage.endedAt = now();
     const exports = buildExports(records);
