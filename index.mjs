@@ -32,6 +32,7 @@ const DEFAULTS = {
   resolveUrls: true,
   maxUrlResolutions: 20,
   debugUrlMenus: false,
+  captureElements: true,
 };
 
 function parseArgs(argv) {
@@ -43,6 +44,7 @@ function parseArgs(argv) {
     else if (arg === "--no-url-resolution") options.resolveUrls = false;
     else if (arg === "--max-url-resolutions") options.maxUrlResolutions = Number(argv[++index]);
     else if (arg === "--debug-url-menus") options.debugUrlMenus = true;
+    else if (arg === "--no-element-capture") options.captureElements = false;
     else if (arg === "--headless") options.headless = true;
     else if (arg === "--details") options.details = true;
     else if (arg === "--url") options.url = argv[++index];
@@ -65,7 +67,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`LinkedIn feed exporter\n\nUsage:\n  node index.mjs [options]\n\nOptions:\n  --url <url>                         Feed URL to collect (default: LinkedIn feed)\n  --output <directory>                Output directory (default: data/linkedin-feed/latest)\n  --profile-dir <directory>           Local Playwright profile directory\n  --max-posts <n>                     Stop after n unique posts (default: 20)\n  --max-scrolls <n>                   Maximum feed scrolls (default: 30)\n  --scroll-pause-ms <n>               Pause between scrolls (default: 1500)\n  --max-idle-scrolls <n>              Stop after no new posts for n scrolls (default: 4)\n  --details                          Open up to --max-detail-posts posts to collect visible dialog entities\n  --max-detail-posts <n>              Detail pages to enrich (default: 25)\n  --max-engagement-entities <n>       Cap comments/reactions captured per post (default: 200)\n  --max-url-resolutions <n>           Maximum visible Copy link to post attempts (default: 20)\n  --no-url-resolution                  Do not open post menus to resolve missing URLs\n  --debug-url-menus                    Save sanitized opened-menu evidence to url-menu-debug.json\n  --headless                          Run headless; headed mode is the safe default\n  --reset-session                     Delete the local browser profile and sign in again\n  --help                              Show this help\n\nThe browser profile at --profile-dir persists your LinkedIn session locally. Missing post URLs are resolved, when possible, through the visible post menu’s Copy link to post action. Use --debug-url-menus to save bounded, sanitized menu evidence when the action is unavailable. No credentials or cookies are uploaded by this script.\n`);
+  console.log(`LinkedIn feed exporter\n\nUsage:\n  node index.mjs [options]\n\nOptions:\n  --url <url>                         Feed URL to collect (default: LinkedIn feed)\n  --output <directory>                Output directory (default: data/linkedin-feed/latest)\n  --profile-dir <directory>           Local Playwright profile directory\n  --max-posts <n>                     Stop after n unique posts (default: 20)\n  --max-scrolls <n>                   Maximum feed scrolls (default: 30)\n  --scroll-pause-ms <n>               Pause between scrolls (default: 1500)\n  --max-idle-scrolls <n>              Stop after no new posts for n scrolls (default: 4)\n  --details                          Open up to --max-detail-posts posts to collect visible dialog entities\n  --max-detail-posts <n>              Detail pages to enrich (default: 25)\n  --max-engagement-entities <n>       Cap comments/reactions captured per post (default: 200)\n  --max-url-resolutions <n>           Maximum visible Copy link to post attempts (default: 20)\n  --no-url-resolution                  Do not open post menus to resolve missing URLs\n  --debug-url-menus                    Save sanitized opened-menu evidence to url-menu-debug.json\n  --no-element-capture                  Do not save complete per-post HTML/evidence captures\n  --headless                          Run headless; headed mode is the safe default\n  --reset-session                     Delete the local browser profile and sign in again\n  --help                              Show this help\n\nThe browser profile at --profile-dir persists your LinkedIn session locally. Missing post URLs are resolved, when possible, through the visible post menu’s Copy link to post action. Use --debug-url-menus to save bounded, sanitized menu evidence when the action is unavailable. No credentials or cookies are uploaded by this script.\n`);
 }
 
 function now() {
@@ -122,6 +124,62 @@ async function expandVisibleText(page) {
     }
   }
   return clicked;
+}
+
+async function extractPostElementCaptures(page) {
+  return await page.locator('div.feed-shared-update-v2, article, [role="article"], [role="listitem"]').evaluateAll((cards) => {
+    const clean = (value) => String(value || "").replace(/\u00a0/g, " ").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+    const absolute = (value) => { try { return new URL(value, location.origin).toString(); } catch { return null; } };
+    const visible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const sanitize = (card) => {
+      const clone = card.cloneNode(true);
+      clone.querySelectorAll("script, style, iframe, noscript, template").forEach((node) => node.remove());
+      clone.querySelectorAll("*").forEach((element) => {
+        [...element.attributes].forEach((attribute) => {
+          if (/^on/i.test(attribute.name) || attribute.name === "style") element.removeAttribute(attribute.name);
+        });
+      });
+      return clone.outerHTML.slice(0, 250000);
+    };
+    const records = [];
+    for (let index = 0; index < cards.length; index += 1) {
+      const card = cards[index];
+      if (!visible(card)) continue;
+      const visibleText = clean(card.innerText);
+      if (!visibleText) continue;
+      const links = [...card.querySelectorAll("a[href]")].map((anchor) => ({ href: absolute(anchor.href), text: clean(anchor.innerText || anchor.textContent), ariaLabel: anchor.getAttribute("aria-label") || null })).filter((link) => link.href);
+      const controls = [...card.querySelectorAll("button, [role=button], [role=menuitem]")].filter(visible).map((element) => ({ tag: element.tagName.toLowerCase(), role: element.getAttribute("role"), ariaLabel: element.getAttribute("aria-label"), text: clean(element.innerText || element.textContent) })).filter((control) => control.ariaLabel || control.text);
+      const attributes = {};
+      for (const element of [card, ...card.querySelectorAll("[data-urn], [data-id], [data-activity-urn], [data-entity-urn]")]) {
+        for (const attribute of ["data-urn", "data-id", "data-activity-urn", "data-entity-urn", "componentkey"]) {
+          const value = element.getAttribute(attribute);
+          if (value) attributes[attribute] = [...new Set([...(attributes[attribute] || []), value])];
+        }
+      }
+      const postUrls = links.map((link) => link.href).filter((href) => /\/feed\/update\/urn:li:(?:activity|share|ugcPost):\d+|\/posts\/[^/?#]+|\/embed\//i.test(new URL(href).pathname));
+      const isFeedCard = /\bfeed post\b/i.test(visibleText) || postUrls.length > 0 || card.querySelector('button[aria-label^="Open control menu for post by" i], button[aria-label^="Hide post by" i], button[aria-label*="repost" i]');
+      if (!isFeedCard) continue;
+      const images = [...card.querySelectorAll("img[src], video[src], source[src]")].map((media) => ({ tag: media.tagName.toLowerCase(), src: absolute(media.currentSrc || media.src), alt: media.getAttribute("alt") || null })).filter((media) => media.src);
+      const authorLink = links.find((link) => /linkedin\.com\/(?:in|company)\//i.test(link.href) && link.text && !/^follow|connect|message$/i.test(link.text));
+      const captureKey = postUrls[0] || [authorLink?.href || "", visibleText.slice(0, 300)].join("|");
+      records.push({ captureId: "element-" + index + "-" + captureKey.slice(0, 180), captureKey, capturedAt: new Date().toISOString(), visibleText, postUrls: [...new Set(postUrls)], author: authorLink || null, links, controls, attributes, media: images, html: sanitize(card) });
+    }
+    return records;
+  });
+}
+
+function dedupeElementCaptures(captures) {
+  const byKey = new Map();
+  for (const capture of captures) {
+    const key = capture.captureKey || capture.captureId || capture.visibleText?.slice(0, 300);
+    const previous = byKey.get(key);
+    if (!previous || (capture.html || "").length > (previous.html || "").length) byKey.set(key, capture);
+  }
+  return [...byKey.values()];
 }
 
 async function extractFeedSnapshots(page) {
@@ -449,9 +507,12 @@ async function collect(options) {
     urlResolutionMenuFound: 0,
     urlResolutionCopyActionFound: 0,
     urlMenuDebugSamples: [],
+    elementCapturesSeen: 0,
+    uniqueElementCaptures: 0,
     gaps: [],
   };
   let records = [];
+  let elementCaptures = [];
 
   try {
     console.log(`Opening ${options.url}`);
@@ -467,6 +528,12 @@ async function collect(options) {
       coverage.scrolls = scroll + 1;
       const expanded = await expandVisibleText(page);
       if (expanded) await page.waitForTimeout(250);
+      if (options.captureElements) {
+        const passCaptures = await extractPostElementCaptures(page);
+        coverage.elementCapturesSeen += passCaptures.length;
+        elementCaptures = dedupeElementCaptures([...elementCaptures, ...passCaptures]).slice(0, options.maxPosts);
+        coverage.uniqueElementCaptures = elementCaptures.length;
+      }
       let snapshots = await extractFeedSnapshots(page);
       const pagePostLinks = await extractPagePostLinks(page);
       coverage.pagePostLinksSeen += pagePostLinks.length;
@@ -540,6 +607,11 @@ async function collect(options) {
       collector: "linkedin-feed-exporter",
       collection: coverage,
       options: { ...options, profileDir: "[local-only]" },
+      elementCapture: {
+        enabled: options.captureElements,
+        count: elementCaptures.length,
+        files: options.captureElements ? ["post-elements.json", "post-elements.ndjson"] : [],
+      },
       counts: {
         posts: exports.posts.length,
         verifiedPostUrls: exports.posts.filter((post) => post.postUrlStatus === "verified").length,
@@ -556,9 +628,14 @@ async function collect(options) {
         "postUrl and crossCheckUrl are populated only when a real post-shaped LinkedIn URL was visible in the card; unresolved cards are never assigned a fake /null or company-page URL.",
         "The browser profile is persisted locally at the configured profileDir so the signed-in session can be reused; it is not uploaded or included in exports.",
         "The tool does not bypass access controls, call undocumented private endpoints, solve CAPTCHAs, or claim universal completeness.",
+        "post-elements.json contains bounded, sanitized per-card HTML and visible evidence for downstream AI interpretation; it may contain personal feed content and remains local-only.",
       ],
     };
     if (options.debugUrlMenus) await writeJson(path.join(options.output, "url-menu-debug.json"), coverage.urlMenuDebugSamples);
+    if (options.captureElements) {
+      await writeJson(path.join(options.output, "post-elements.json"), elementCaptures);
+      await writeNdjson(path.join(options.output, "post-elements.ndjson"), elementCaptures);
+    }
     await writeJson(path.join(options.output, "manifest.json"), manifest);
     await writeJson(path.join(options.output, "posts.json"), exports.posts);
     await writeJson(path.join(options.output, "jobs.json"), exports.jobs);
@@ -566,7 +643,7 @@ async function collect(options) {
     await writeJson(path.join(options.output, "engagement.json"), exports.engagement);
     await writeNdjson(path.join(options.output, "posts.ndjson"), exports.posts);
     await fs.rm(path.join(options.output, "posts.partial.json"), { force: true });
-    console.log(`Finished. Wrote ${exports.posts.length} posts, ${exports.jobs.length} jobs, ${exports.authors.length} authors to ${options.output}`);
+    console.log(`Finished. Wrote ${exports.posts.length} posts, ${exports.jobs.length} jobs, ${exports.authors.length} authors${options.captureElements ? `, ${elementCaptures.length} complete element captures` : ""} to ${options.output}`);
     if (coverage.gaps.length) console.log(`Coverage notes: ${coverage.gaps.join(" | ")}`);
   } finally {
     await browser.close();
