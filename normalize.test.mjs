@@ -63,6 +63,7 @@ test("rejects fake, company-page, and unresolved URLs instead of presenting them
   assert.equal(canonicalizePostUrl("https://www.linkedin.com/null"), null);
   assert.equal(canonicalizePostUrl("https://www.linkedin.com/company/example/posts"), null);
   assert.equal(canonicalizePostUrl("https://www.linkedin.com/feed/update/urn:li:share:7494016921496031232"), "https://www.linkedin.com/feed/update/urn:li:share:7494016921496031232");
+  assert.equal(canonicalizePostUrl("https://www.linkedin.com/feed/update/urn:li:ugcPost:7493974802932690945/"), "https://www.linkedin.com/feed/update/urn:li:ugcPost:7493974802932690945");
   assert.equal(canonicalizePostUrl("https://www.linkedin.com/posts/example-author_activity-7494016921496031232"), "https://www.linkedin.com/posts/example-author_activity-7494016921496031232");
 
   const record = normalizeSnapshot({
@@ -95,6 +96,15 @@ test("normalizes a real feed URL and strips degree suffixes from author names", 
   assert.equal(record.postUrlStatus, "verified");
   assert.equal(record.crossCheckUrl, "https://www.linkedin.com/feed/update/urn:li:share:7494016921496031232");
   assert.equal(record.postId, "urn:li:share:7494016921496031232");
+
+  const ugcRecord = normalizeSnapshot({
+    postUrl: "https://www.linkedin.com/feed/update/urn:li:ugcPost:7493974802932690945/",
+    text: "An organic post",
+    rawText: "Feed post\\n\\nAuthor\\n\\nAn organic post",
+    author: { name: "Author", profileUrl: "https://www.linkedin.com/in/author" },
+  }, "https://www.linkedin.com/feed", "2026-08-18T03:21:19.000Z");
+  assert.equal(ugcRecord.postUrlStatus, "verified");
+  assert.equal(ugcRecord.postId, "urn:li:ugcPost:7493974802932690945");
   assert.equal(record.author.name, "Lavanya Jain");
   assert.equal(record.relativeTime, "5d");
 });

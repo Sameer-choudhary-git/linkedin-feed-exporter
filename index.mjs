@@ -162,10 +162,10 @@ async function extractFeedSnapshots(page) {
           node.getAttribute("data-activity-urn"),
           node.getAttribute("data-entity-urn"),
         ]).filter(Boolean).join(" ");
-        const domMarker = markerText.match(/urn:li:(?:activity|share):\d+/i)?.[0] || "";
+        const domMarker = markerText.match(/urn:li:(?:activity|share|ugcPost):\d+/i)?.[0] || "";
         const markerUrl = domMarker ? `${location.origin}/feed/update/${domMarker}` : null;
         const postUrlCandidates = [markerUrl, ...allLinks.map(({ href }) => toAbsolute(href))]
-          .filter((href) => href && /\/feed\/update\/urn:li:(?:activity|share):\d+|\/posts\/[^/?#]+|\/embed\//i.test(new URL(href).pathname));
+          .filter((href) => href && /\/feed\/update\/urn:li:(?:activity|share|ugcPost):\d+|\/posts\/[^/?#]+|\/embed\//i.test(new URL(href).pathname));
         const postUrl = postUrlCandidates[0] || null;
         const profileLinks = allLinks.filter(({ href, text }) => /linkedin\.com\/(in|company)\//i.test(href) && text.length > 1);
         const authorLink = profileLinks.find(({ text }) => !/^follow|connect|message$/i.test(text)) || profileLinks[0] || {};
