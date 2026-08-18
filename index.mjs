@@ -31,6 +31,7 @@ const DEFAULTS = {
   resetSession: false,
   resolveUrls: true,
   maxUrlResolutions: 20,
+  debugUrlMenus: false,
 };
 
 function parseArgs(argv) {
@@ -41,6 +42,7 @@ function parseArgs(argv) {
     if (arg === "--reset-session") options.resetSession = true;
     else if (arg === "--no-url-resolution") options.resolveUrls = false;
     else if (arg === "--max-url-resolutions") options.maxUrlResolutions = Number(argv[++index]);
+    else if (arg === "--debug-url-menus") options.debugUrlMenus = true;
     else if (arg === "--headless") options.headless = true;
     else if (arg === "--details") options.details = true;
     else if (arg === "--url") options.url = argv[++index];
@@ -63,7 +65,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`LinkedIn feed exporter\n\nUsage:\n  node index.mjs [options]\n\nOptions:\n  --url <url>                         Feed URL to collect (default: LinkedIn feed)\n  --output <directory>                Output directory (default: data/linkedin-feed/latest)\n  --profile-dir <directory>           Local Playwright profile directory\n  --max-posts <n>                     Stop after n unique posts (default: 20)\n  --max-scrolls <n>                   Maximum feed scrolls (default: 30)\n  --scroll-pause-ms <n>               Pause between scrolls (default: 1500)\n  --max-idle-scrolls <n>              Stop after no new posts for n scrolls (default: 4)\n  --details                          Open up to --max-detail-posts posts to collect visible dialog entities\n  --max-detail-posts <n>              Detail pages to enrich (default: 25)\n  --max-engagement-entities <n>       Cap comments/reactions captured per post (default: 200)\n  --max-url-resolutions <n>           Maximum visible Copy link to post attempts (default: 20)\n  --no-url-resolution                  Do not open post menus to resolve missing URLs\n  --headless                          Run headless; headed mode is the safe default\n  --reset-session                     Delete the local browser profile and sign in again\n  --help                              Show this help\n\nThe browser profile at --profile-dir persists your LinkedIn session locally. Missing post URLs are resolved, when possible, through the visible post menu’s Copy link to post action. No credentials or cookies are uploaded by this script.\n`);
+  console.log(`LinkedIn feed exporter\n\nUsage:\n  node index.mjs [options]\n\nOptions:\n  --url <url>                         Feed URL to collect (default: LinkedIn feed)\n  --output <directory>                Output directory (default: data/linkedin-feed/latest)\n  --profile-dir <directory>           Local Playwright profile directory\n  --max-posts <n>                     Stop after n unique posts (default: 20)\n  --max-scrolls <n>                   Maximum feed scrolls (default: 30)\n  --scroll-pause-ms <n>               Pause between scrolls (default: 1500)\n  --max-idle-scrolls <n>              Stop after no new posts for n scrolls (default: 4)\n  --details                          Open up to --max-detail-posts posts to collect visible dialog entities\n  --max-detail-posts <n>              Detail pages to enrich (default: 25)\n  --max-engagement-entities <n>       Cap comments/reactions captured per post (default: 200)\n  --max-url-resolutions <n>           Maximum visible Copy link to post attempts (default: 20)\n  --no-url-resolution                  Do not open post menus to resolve missing URLs\n  --debug-url-menus                    Save sanitized opened-menu evidence to url-menu-debug.json\n  --headless                          Run headless; headed mode is the safe default\n  --reset-session                     Delete the local browser profile and sign in again\n  --help                              Show this help\n\nThe browser profile at --profile-dir persists your LinkedIn session locally. Missing post URLs are resolved, when possible, through the visible post menu’s Copy link to post action. Use --debug-url-menus to save bounded, sanitized menu evidence when the action is unavailable. No credentials or cookies are uploaded by this script.\n`);
 }
 
 function now() {
@@ -232,6 +234,35 @@ async function extractFeedSnapshots(page) {
     });
 }
 
+async function collectVisibleMenuState(page) {
+  return await page.locator("body").evaluate((body) => {
+    const visible = (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const elements = [...body.querySelectorAll('[role="menu"], [role="menuitem"], [role="listbox"], [role="option"], button, a, [tabindex]')]
+      .filter(visible)
+      .map((element) => ({
+        tag: element.tagName.toLowerCase(),
+        role: element.getAttribute("role"),
+        ariaLabel: element.getAttribute("aria-label"),
+        text: String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 300),
+        href: element.getAttribute("href"),
+      }))
+      .filter((item) => /copy|share|link|post|report|save|send/i.test((item.ariaLabel || "") + " " + (item.text || "") + " " + (item.href || "")));
+    const menus = [...body.querySelectorAll('[role="menu"], [role="listbox"]')]
+      .filter(visible)
+      .slice(-5)
+      .map((element) => ({
+        role: element.getAttribute("role"),
+        text: String(element.innerText || element.textContent || "").replace(/\s+/g, " ").trim().slice(0, 2000),
+        html: element.outerHTML.slice(0, 20000),
+      }));
+    return { elements: elements.slice(-120), menus };
+  }).catch(() => ({ elements: [], menus: [] }));
+}
+
 async function resolvePostUrlFromCard(page, card) {
   const existing = card.postUrl || card.postUrlCandidates?.find((value) => canonicalizePostUrl(value));
   if (existing) return { record: card, resolvedUrl: canonicalizePostUrl(existing), method: "dom" };
@@ -250,11 +281,12 @@ async function resolvePostUrlFromCard(page, card) {
   if (selectedIndex < 0) return { record: card, resolvedUrl: null, method: "unresolved" };
 
   await menuButtons.nth(selectedIndex).click({ timeout: 2_000 }).catch(() => undefined);
+  const menuDebug = await collectVisibleMenuState(page);
   const menu = page.locator('[role="menu"], [role="listbox"]').last();
   const copyItem = menu.locator('button, [role="menuitem"], li, div').filter({ hasText: /copy link(?: to post)?|copy link/i }).first();
   if (!(await copyItem.isVisible().catch(() => false))) {
     await page.keyboard.press("Escape").catch(() => undefined);
-    return { record: card, resolvedUrl: null, method: "menu-no-copy-action" };
+    return { record: card, resolvedUrl: null, method: "menu-no-copy-action", menuDebug };
   }
 
   await copyItem.click({ timeout: 2_000 }).catch(() => undefined);
@@ -267,6 +299,7 @@ async function resolvePostUrlFromCard(page, card) {
     record: resolvedUrl ? { ...card, postUrl: resolvedUrl, postUrlCandidates: [...new Set([...(card.postUrlCandidates || []), resolvedUrl])] } : card,
     resolvedUrl,
     method: resolvedUrl ? "copy-link-menu" : "copy-action-no-valid-url",
+    menuDebug,
   };
 }
 
@@ -376,6 +409,7 @@ async function collect(options) {
     urlResolutionSucceeded: 0,
     urlResolutionMenuFound: 0,
     urlResolutionCopyActionFound: 0,
+    urlMenuDebugSamples: [],
     gaps: [],
   };
   let records = [];
@@ -403,6 +437,7 @@ async function collect(options) {
           if (!snapshot.postUrl && coverage.urlResolutionAttempts < options.maxUrlResolutions) {
             coverage.urlResolutionAttempts += 1;
             const result = await resolvePostUrlFromCard(page, snapshot);
+            if (options.debugUrlMenus && result.menuDebug) coverage.urlMenuDebugSamples.push({ author: snapshot.author?.name || null, method: result.method, debug: result.menuDebug });
             if (result.method !== "unresolved") coverage.urlResolutionMenuFound += 1;
             if (result.method === "copy-link-menu") coverage.urlResolutionCopyActionFound += 1;
             if (result.resolvedUrl) {
@@ -479,6 +514,7 @@ async function collect(options) {
         "The tool does not bypass access controls, call undocumented private endpoints, solve CAPTCHAs, or claim universal completeness.",
       ],
     };
+    if (options.debugUrlMenus) await writeJson(path.join(options.output, "url-menu-debug.json"), coverage.urlMenuDebugSamples);
     await writeJson(path.join(options.output, "manifest.json"), manifest);
     await writeJson(path.join(options.output, "posts.json"), exports.posts);
     await writeJson(path.join(options.output, "jobs.json"), exports.jobs);
