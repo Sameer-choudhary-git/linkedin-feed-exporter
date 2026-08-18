@@ -243,6 +243,7 @@ async function resolvePostUrlFromCard(page, card) {
     'button[aria-label*="more" i]',
     'button[aria-label*="options" i]',
     'button[aria-label*="actions" i]',
+    'button[aria-label*="control menu" i]',
     '[role="button"][aria-label*="more" i]',
     '[role="button"][aria-label*="options" i]',
   ].join(", "));
@@ -381,6 +382,8 @@ async function collect(options) {
     detailPostsEnriched: 0,
     urlResolutionAttempts: 0,
     urlResolutionSucceeded: 0,
+    urlResolutionMenuFound: 0,
+    urlResolutionCopyActionFound: 0,
     gaps: [],
   };
   let records = [];
@@ -408,6 +411,8 @@ async function collect(options) {
           if (!snapshot.postUrl && coverage.urlResolutionAttempts < options.maxUrlResolutions) {
             coverage.urlResolutionAttempts += 1;
             const result = await resolvePostUrlFromCard(page, snapshot);
+            if (result.method !== "unresolved") coverage.urlResolutionMenuFound += 1;
+            if (result.method === "copy-link-menu") coverage.urlResolutionCopyActionFound += 1;
             if (result.resolvedUrl) {
               coverage.urlResolutionSucceeded += 1;
               resolvedSnapshots.push(result.record);
