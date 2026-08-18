@@ -234,6 +234,43 @@ async function extractFeedSnapshots(page) {
     });
 }
 
+async function extractPagePostLinks(page) {
+  return await page.locator('a[href*="/feed/update/urn:li:"]').evaluateAll((anchors) => anchors.map((anchor) => {
+    const clean = (value) => String(value || "").replace(/\u00a0/g, " ").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+    const href = anchor.href || "";
+    let node = anchor;
+    let containerText = clean(anchor.innerText || anchor.textContent);
+    for (let depth = 0; depth < 8 && node; depth += 1) {
+      node = node.parentElement;
+      if (!node) break;
+      const text = clean(node.innerText || node.textContent);
+      if ((node.getAttribute("role") === "listitem" || node.matches("article, div.feed-shared-update-v2")) && text.length > containerText.length) {
+        containerText = text;
+        break;
+      }
+    }
+    return { href, text: clean(anchor.innerText || anchor.textContent), containerText };
+  }).filter((value) => value.href));
+}
+
+function associatePagePostLinks(snapshots, pageLinks) {
+  const unused = [...pageLinks];
+  return snapshots.map((snapshot) => {
+    if (snapshot.postUrl || !unused.length) return snapshot;
+    const sourceText = normalizeText(snapshot.text || snapshot.rawText || "");
+    if (!sourceText) return snapshot;
+    const sourcePrefix = sourceText.slice(0, 100);
+    const index = unused.findIndex((link) => {
+      const containerText = normalizeText(link.containerText || "");
+      const linkText = normalizeText(link.text || "");
+      return (linkText && sourceText.includes(linkText.slice(0, 80))) || (containerText && (containerText.includes(sourcePrefix) || sourceText.includes(containerText.slice(0, 100))));
+    });
+    if (index < 0) return snapshot;
+    const [match] = unused.splice(index, 1);
+    return { ...snapshot, postUrl: match.href, postUrlCandidates: [...new Set([...(snapshot.postUrlCandidates || []), match.href])], source: { ...(snapshot.source || {}), extractionMode: "visible-dom+page-link-association" } };
+  });
+}
+
 async function collectVisibleMenuState(page) {
   return await page.locator("body").evaluate((body) => {
     const visible = (element) => {
@@ -405,6 +442,8 @@ async function collect(options) {
     uniquePosts: 0,
     detailPostsAttempted: 0,
     detailPostsEnriched: 0,
+    pagePostLinksSeen: 0,
+    pagePostLinksAssociated: 0,
     urlResolutionAttempts: 0,
     urlResolutionSucceeded: 0,
     urlResolutionMenuFound: 0,
@@ -429,6 +468,11 @@ async function collect(options) {
       const expanded = await expandVisibleText(page);
       if (expanded) await page.waitForTimeout(250);
       let snapshots = await extractFeedSnapshots(page);
+      const pagePostLinks = await extractPagePostLinks(page);
+      coverage.pagePostLinksSeen += pagePostLinks.length;
+      const linkedBeforeAssociation = snapshots.filter((snapshot) => snapshot.postUrl).length;
+      snapshots = associatePagePostLinks(snapshots, pagePostLinks);
+      coverage.pagePostLinksAssociated += Math.max(0, snapshots.filter((snapshot) => snapshot.postUrl).length - linkedBeforeAssociation);
       coverage.visibleCardsSeen += await page.locator('div.feed-shared-update-v2, article, [role="article"], [role="listitem"]').count().catch(() => 0);
       coverage.snapshotsSeen += snapshots.length;
       if (options.resolveUrls && coverage.urlResolutionAttempts < options.maxUrlResolutions) {
