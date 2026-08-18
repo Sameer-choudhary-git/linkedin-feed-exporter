@@ -19,7 +19,7 @@ const DEFAULTS = {
   url: "https://www.linkedin.com/feed/",
   output: path.resolve("data/linkedin-feed/latest"),
   profileDir: path.resolve(".local/linkedin-profile"),
-  maxPosts: 100,
+  maxPosts: 20,
   maxScrolls: 30,
   scrollPauseMs: 1500,
   maxIdleScrolls: 4,
@@ -58,7 +58,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`LinkedIn feed exporter\n\nUsage:\n  node index.mjs [options]\n\nOptions:\n  --url <url>                         Feed URL to collect (default: LinkedIn feed)\n  --output <directory>                Output directory (default: data/linkedin-feed/latest)\n  --profile-dir <directory>           Local Playwright profile directory\n  --max-posts <n>                     Stop after n unique posts (default: 100)\n  --max-scrolls <n>                   Maximum feed scrolls (default: 30)\n  --scroll-pause-ms <n>               Pause between scrolls (default: 1500)\n  --max-idle-scrolls <n>              Stop after no new posts for n scrolls (default: 4)\n  --details                          Open up to --max-detail-posts posts to collect visible dialog entities\n  --max-detail-posts <n>              Detail pages to enrich (default: 25)\n  --max-engagement-entities <n>       Cap comments/reactions captured per post (default: 200)\n  --headless                          Run headless; headed mode is the safe default\n  --reset-session                     Delete the local browser profile and sign in again\n  --help                              Show this help\n\nThe browser profile at --profile-dir persists your LinkedIn session locally between runs. No credentials or cookies are uploaded by this script. Use --reset-session to clear it.\n`);
+  console.log(`LinkedIn feed exporter\n\nUsage:\n  node index.mjs [options]\n\nOptions:\n  --url <url>                         Feed URL to collect (default: LinkedIn feed)\n  --output <directory>                Output directory (default: data/linkedin-feed/latest)\n  --profile-dir <directory>           Local Playwright profile directory\n  --max-posts <n>                     Stop after n unique posts (default: 20)\n  --max-scrolls <n>                   Maximum feed scrolls (default: 30)\n  --scroll-pause-ms <n>               Pause between scrolls (default: 1500)\n  --max-idle-scrolls <n>              Stop after no new posts for n scrolls (default: 4)\n  --details                          Open up to --max-detail-posts posts to collect visible dialog entities\n  --max-detail-posts <n>              Detail pages to enrich (default: 25)\n  --max-engagement-entities <n>       Cap comments/reactions captured per post (default: 200)\n  --headless                          Run headless; headed mode is the safe default\n  --reset-session                     Delete the local browser profile and sign in again\n  --help                              Show this help\n\nThe browser profile at --profile-dir persists your LinkedIn session locally between runs. No credentials or cookies are uploaded by this script. Use --reset-session to clear it.\n`);
 }
 
 function now() {
@@ -346,8 +346,12 @@ async function collect(options) {
       records = dedupeRecords([...records, ...normalized]).slice(0, options.maxPosts);
       coverage.uniquePosts = records.length;
       idleScrolls = records.length === before ? idleScrolls + 1 : 0;
-      console.log(`Scroll ${coverage.scrolls}: ${records.length} unique posts; ${idleScrolls}/${options.maxIdleScrolls} idle`);
+      console.log(`Scroll ${coverage.scrolls}: ${records.length}/${options.maxPosts} unique posts; ${idleScrolls}/${options.maxIdleScrolls} idle`);
       await writeJson(path.join(options.output, "posts.partial.json"), records);
+      if (records.length >= options.maxPosts) {
+        console.log(`Post limit reached: ${records.length}/${options.maxPosts}. Stopping before the next scroll.`);
+        break;
+      }
       if (idleScrolls >= options.maxIdleScrolls) break;
       await page.mouse.wheel(0, Math.max(900, Math.floor(page.viewportSize()?.height || 900) * 0.85));
       await page.waitForTimeout(options.scrollPauseMs);
