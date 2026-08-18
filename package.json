@@ -1,0 +1,19 @@
+{
+  "name": "linkedin-feed-exporter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A user-invoked, visible-browser LinkedIn feed exporter with coverage reporting.",
+  "scripts": {
+    "export": "node index.mjs",
+    "test": "node --test normalize.test.mjs",
+    "check": "node --check index.mjs && node --check lib/normalize.mjs",
+    "install-browser": "playwright install chromium"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "^1.61.1"
+  }
+}
