@@ -8,15 +8,15 @@ This is a local, user-invoked Playwright utility for exporting the LinkedIn feed
 
 The exporter does not read usernames or passwords, does not solve CAPTCHAs, does not call undocumented private endpoints, does not bypass access controls or result limits, and does not perform actions such as liking, commenting, messaging, following, or applying to jobs. Headed mode is the default so that the user can see the browser activity. Run it only for data you are authorized to collect and retain.
 
-LinkedIn’s official documentation currently presents approved APIs for products such as sign-in, sharing, and company/community management, but not a general member home-feed read API. LinkedIn also states that unauthorized crawlers, bots, browser extensions, and scraping tools may violate its User Agreement. See `docs/linkedin-collection-findings.md` for the source links and the resulting engineering decision.
+LinkedIn’s official documentation currently presents approved APIs for products such as sign-in, sharing, and company/community management, but not a general member home-feed read API. LinkedIn also states that unauthorized crawlers, bots, browser extensions, and scraping tools may violate its User Agreement. See `linkedin-collection-findings.md` for the source links and the resulting engineering decision.
 
 ## Run it
 
-From the repository root, install the existing workspace dependencies and run:
+From the repository root, install the project dependencies and run:
 
 ```sh
 pnpm install
-pnpm linkedin:export -- --max-posts 100 --max-scrolls 30
+pnpm export -- --max-posts 100 --max-scrolls 30
 ```
 
 The browser opens in a repository-local profile directory at `.local/linkedin-profile`. On the first run, sign in manually in that browser, open the feed you want to collect, and press Enter in the terminal. The profile directory is ignored by Git and is never included in the JSON output.
@@ -24,7 +24,7 @@ The browser opens in a repository-local profile directory at `.local/linkedin-pr
 For bounded detail enrichment:
 
 ```sh
-pnpm linkedin:export -- --max-posts 50 --details --max-detail-posts 10 --max-engagement-entities 200
+pnpm export -- --max-posts 50 --details --max-detail-posts 10 --max-engagement-entities 200
 ```
 
 Useful options include `--url` for a specific LinkedIn feed URL, `--output` for a different output directory, `--max-idle-scrolls` to stop when no new records appear, and `--headless` for environments where a visible browser is unavailable. Headed mode is recommended for normal use.
@@ -55,7 +55,7 @@ In feed-only mode, comments and reaction identities are populated only when Link
 Run the deterministic parser tests with:
 
 ```sh
-pnpm linkedin:test
+pnpm test
 ```
 
 The tests cover count parsing, stable post identifiers, engagement extraction, job linking, and deduplication. Browser collection itself requires an authenticated LinkedIn session and is intentionally not run in CI by default.
