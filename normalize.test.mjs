@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   canonicalizePostUrl,
+  classifyPost,
   dedupeRecords,
   extractEngagement,
   extractJob,
@@ -32,6 +33,19 @@ test("extractEngagement reads the visible labels without guessing missing values
     comments: null,
     reposts: null,
   });
+});
+
+test("promoted Apply Now advertisements are not false job records", () => {
+  assert.equal(classifyPost({
+    isPromoted: true,
+    rawText: "Feed post\\n\\nPromoted\\n\\nCertificate programme\\n\\nApply Now",
+    job: null,
+  }), "promoted");
+  assert.equal(extractJob({
+    isPromoted: true,
+    rawText: "Feed post\\n\\nPromoted\\n\\nCertificate programme\\n\\nApply Now",
+    job: null,
+  }), null);
 });
 
 test("extractJob keeps job records linked to the source post", () => {

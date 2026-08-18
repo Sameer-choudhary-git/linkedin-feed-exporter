@@ -6,6 +6,7 @@ import process from "node:process";
 import { chromium } from "playwright";
 import {
   canonicalizeUrl,
+  canonicalizePostUrl,
   dedupeRecords,
   extractEngagement,
   extractSocialContext,
@@ -28,6 +29,8 @@ const DEFAULTS = {
   maxEngagementEntities: 200,
   headless: false,
   resetSession: false,
+  resolveUrls: true,
+  maxUrlResolutions: 20,
 };
 
 function parseArgs(argv) {
@@ -36,6 +39,8 @@ function parseArgs(argv) {
     const arg = argv[index];
     if (arg === "--") continue;
     if (arg === "--reset-session") options.resetSession = true;
+    else if (arg === "--no-url-resolution") options.resolveUrls = false;
+    else if (arg === "--max-url-resolutions") options.maxUrlResolutions = Number(argv[++index]);
     else if (arg === "--headless") options.headless = true;
     else if (arg === "--details") options.details = true;
     else if (arg === "--url") options.url = argv[++index];
@@ -58,7 +63,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`LinkedIn feed exporter\n\nUsage:\n  node index.mjs [options]\n\nOptions:\n  --url <url>                         Feed URL to collect (default: LinkedIn feed)\n  --output <directory>                Output directory (default: data/linkedin-feed/latest)\n  --profile-dir <directory>           Local Playwright profile directory\n  --max-posts <n>                     Stop after n unique posts (default: 20)\n  --max-scrolls <n>                   Maximum feed scrolls (default: 30)\n  --scroll-pause-ms <n>               Pause between scrolls (default: 1500)\n  --max-idle-scrolls <n>              Stop after no new posts for n scrolls (default: 4)\n  --details                          Open up to --max-detail-posts posts to collect visible dialog entities\n  --max-detail-posts <n>              Detail pages to enrich (default: 25)\n  --max-engagement-entities <n>       Cap comments/reactions captured per post (default: 200)\n  --headless                          Run headless; headed mode is the safe default\n  --reset-session                     Delete the local browser profile and sign in again\n  --help                              Show this help\n\nThe browser profile at --profile-dir persists your LinkedIn session locally between runs. No credentials or cookies are uploaded by this script. Use --reset-session to clear it.\n`);
+  console.log(`LinkedIn feed exporter\n\nUsage:\n  node index.mjs [options]\n\nOptions:\n  --url <url>                         Feed URL to collect (default: LinkedIn feed)\n  --output <directory>                Output directory (default: data/linkedin-feed/latest)\n  --profile-dir <directory>           Local Playwright profile directory\n  --max-posts <n>                     Stop after n unique posts (default: 20)\n  --max-scrolls <n>                   Maximum feed scrolls (default: 30)\n  --scroll-pause-ms <n>               Pause between scrolls (default: 1500)\n  --max-idle-scrolls <n>              Stop after no new posts for n scrolls (default: 4)\n  --details                          Open up to --max-detail-posts posts to collect visible dialog entities\n  --max-detail-posts <n>              Detail pages to enrich (default: 25)\n  --max-engagement-entities <n>       Cap comments/reactions captured per post (default: 200)\n  --max-url-resolutions <n>           Maximum visible Copy link to post attempts (default: 20)\n  --no-url-resolution                  Do not open post menus to resolve missing URLs\n  --headless                          Run headless; headed mode is the safe default\n  --reset-session                     Delete the local browser profile and sign in again\n  --help                              Show this help\n\nThe browser profile at --profile-dir persists your LinkedIn session locally. Missing post URLs are resolved, when possible, through the visible post menu’s Copy link to post action. No credentials or cookies are uploaded by this script.\n`);
 }
 
 function now() {
@@ -189,7 +194,8 @@ async function extractFeedSnapshots(page) {
           '[role="button"][aria-label*="reaction" i]',
           '[role="button"][aria-label*="comment" i]',
         ]).map((element) => clean(element.getAttribute("aria-label") || element.textContent));
-        const jobLink = allLinks.find(({ href, text }) => /\/jobs\/view\//i.test(href) || /view job|apply now/i.test(text));
+        const jobLink = allLinks.find(({ href }) => /\/jobs\/view\//i.test(href));
+        const hasJobCta = Boolean(jobLink || /\bview job\b/i.test(rawText));
         const jobTitle = clean(first(card, ['a[href*="/jobs/view/"]', 'a[href*="/jobs/"]'])?.textContent);
         const images = all(card, [
           'img[src*="feedshare"]',
@@ -218,11 +224,57 @@ async function extractFeedSnapshots(page) {
           hasVideo: Boolean(card.querySelector("video, [data-test-video]")),
           hasDocument: Boolean(card.querySelector('a[href*="/document/"] img, [data-test-id*="document" i]')),
           hasPoll: Boolean(card.querySelector('[role="radio"], [data-test-id*="poll" i]')),
+          hasJobCta,
           job: jobLink ? { url: toAbsolute(jobLink.href), title: jobTitle || null } : null,
           domMarker: domMarker || null,
         };
       }).filter((snapshot) => snapshot.postUrl || snapshot.text || snapshot.job);
     });
+}
+
+async function resolvePostUrlFromCard(page, card) {
+  const existing = card.postUrl || card.postUrlCandidates?.find((value) => canonicalizePostUrl(value));
+  if (existing) return { record: card, resolvedUrl: canonicalizePostUrl(existing), method: "dom" };
+
+  const cardLocator = page.locator('div.feed-shared-update-v2, article, [role="article"], [role="listitem"]').filter({ hasText: card.text?.slice(0, 120) || "Feed post" }).first();
+  if (!(await cardLocator.isVisible().catch(() => false))) return { record: card, resolvedUrl: null, method: "unresolved" };
+
+  const menuButtons = cardLocator.locator([
+    'button[aria-label*="more" i]',
+    'button[aria-label*="options" i]',
+    'button[aria-label*="actions" i]',
+    '[role="button"][aria-label*="more" i]',
+    '[role="button"][aria-label*="options" i]',
+  ].join(", "));
+  let menuButton = null;
+  for (let index = 0; index < await menuButtons.count().catch(() => 0); index += 1) {
+    const candidate = menuButtons.nth(index);
+    if (await candidate.isVisible().catch(() => false)) {
+      menuButton = candidate;
+      break;
+    }
+  }
+  if (!menuButton) return { record: card, resolvedUrl: null, method: "unresolved" };
+
+  await menuButton.click({ timeout: 2_000 }).catch(() => undefined);
+  const menu = page.locator('[role="menu"], [role="listbox"]').last();
+  const copyItem = menu.locator('button, [role="menuitem"], li').filter({ hasText: /copy link(?: to post)?|copy link/i }).first();
+  if (!(await copyItem.isVisible().catch(() => false))) {
+    await page.keyboard.press("Escape").catch(() => undefined);
+    return { record: card, resolvedUrl: null, method: "unresolved" };
+  }
+
+  await copyItem.click({ timeout: 2_000 }).catch(() => undefined);
+  await page.waitForTimeout(150);
+  const clipboard = await page.evaluate(async () => {
+    try { return await navigator.clipboard.readText(); } catch { return ""; }
+  }).catch(() => "");
+  const resolvedUrl = canonicalizePostUrl(clipboard);
+  return {
+    record: resolvedUrl ? { ...card, postUrl: resolvedUrl, postUrlCandidates: [...new Set([...(card.postUrlCandidates || []), resolvedUrl])] } : card,
+    resolvedUrl,
+    method: resolvedUrl ? "copy-link-menu" : "unresolved",
+  };
 }
 
 async function extractDialogEntities(page, kind, cap) {
@@ -314,6 +366,7 @@ async function collect(options) {
     viewport: { width: 1440, height: 1000 },
     locale: "en-US",
     serviceWorkers: "allow",
+    permissions: ["clipboard-read", "clipboard-write"],
   });
   const page = browser.pages()[0] || await browser.newPage();
   const coverage = {
@@ -326,6 +379,8 @@ async function collect(options) {
     uniquePosts: 0,
     detailPostsAttempted: 0,
     detailPostsEnriched: 0,
+    urlResolutionAttempts: 0,
+    urlResolutionSucceeded: 0,
     gaps: [],
   };
   let records = [];
@@ -344,9 +399,25 @@ async function collect(options) {
       coverage.scrolls = scroll + 1;
       const expanded = await expandVisibleText(page);
       if (expanded) await page.waitForTimeout(250);
-      const snapshots = await extractFeedSnapshots(page);
+      let snapshots = await extractFeedSnapshots(page);
       coverage.visibleCardsSeen += await page.locator('div.feed-shared-update-v2, article, [role="article"], [role="listitem"]').count().catch(() => 0);
       coverage.snapshotsSeen += snapshots.length;
+      if (options.resolveUrls && coverage.urlResolutionAttempts < options.maxUrlResolutions) {
+        const resolvedSnapshots = [];
+        for (const snapshot of snapshots) {
+          if (!snapshot.postUrl && coverage.urlResolutionAttempts < options.maxUrlResolutions) {
+            coverage.urlResolutionAttempts += 1;
+            const result = await resolvePostUrlFromCard(page, snapshot);
+            if (result.resolvedUrl) {
+              coverage.urlResolutionSucceeded += 1;
+              resolvedSnapshots.push(result.record);
+              continue;
+            }
+          }
+          resolvedSnapshots.push(snapshot);
+        }
+        snapshots = resolvedSnapshots;
+      }
       const normalized = snapshots.map((snapshot) => normalizeSnapshot(snapshot, page.url(), now())).filter((record) => record.postId || record.postUrl || record.text.length > 20);
       const before = records.length;
       records = dedupeRecords([...records, ...normalized]).slice(0, options.maxPosts);
