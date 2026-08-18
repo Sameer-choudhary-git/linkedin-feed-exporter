@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  canonicalizePostUrl,
   dedupeRecords,
   extractEngagement,
   extractJob,
+  normalizeSnapshot,
   parseCount,
   parsePostId,
 } from "./lib/normalize.mjs";
@@ -41,6 +43,45 @@ test("extractJob keeps job records linked to the source post", () => {
   assert.equal(job.jobId, "https://www.linkedin.com/jobs/view/987654321");
   assert.equal(job.sourcePostId, "1234567890123");
   assert.equal(job.title, "Staff Engineer");
+});
+
+test("rejects fake, company-page, and unresolved URLs instead of presenting them as post links", () => {
+  assert.equal(canonicalizePostUrl("https://www.linkedin.com/null"), null);
+  assert.equal(canonicalizePostUrl("https://www.linkedin.com/company/example/posts"), null);
+  assert.equal(canonicalizePostUrl("https://www.linkedin.com/feed/update/urn:li:share:7494016921496031232"), "https://www.linkedin.com/feed/update/urn:li:share:7494016921496031232");
+
+  const record = normalizeSnapshot({
+    postUrl: "https://www.linkedin.com/company/example/posts",
+    postUrlCandidates: ["https://www.linkedin.com/company/example/posts"],
+    text: "Sponsored example",
+    rawText: "Feed post\n\nExample Company\n\nPromoted\n\nSponsored example\n\n5d •",
+    isPromoted: true,
+    author: { name: "Example Company", profileUrl: "https://www.linkedin.com/company/example/posts" },
+    engagementLabels: ["3,634 reactions", "16 comments"],
+  }, "https://www.linkedin.com/feed/", "2026-08-18T03:21:19.000Z");
+
+  assert.equal(record.postUrl, null);
+  assert.equal(record.postUrlStatus, "unresolved");
+  assert.equal(record.crossCheckUrl, null);
+  assert.equal(record.postType, "promoted");
+  assert.equal(record.relativeTime, "5d");
+  assert.equal(record.engagement.reactions, 3634);
+  assert.equal(record.engagement.comments, 16);
+});
+
+test("normalizes a real feed URL and strips degree suffixes from author names", () => {
+  const record = normalizeSnapshot({
+    postUrl: "https://www.linkedin.com/feed/update/urn:li:share:7494016921496031232/",
+    text: "A real post",
+    rawText: "Feed post\n\nLavanya Jain • 1st\n\n5d •\n\nA real post",
+    author: { name: "Lavanya Jain • 1st", profileUrl: "https://www.linkedin.com/in/ilavanyajain" },
+  }, "https://www.linkedin.com/feed", "2026-08-18T03:21:19.000Z");
+
+  assert.equal(record.postUrlStatus, "verified");
+  assert.equal(record.crossCheckUrl, "https://www.linkedin.com/feed/update/urn:li:share:7494016921496031232");
+  assert.equal(record.postId, "urn:li:share:7494016921496031232");
+  assert.equal(record.author.name, "Lavanya Jain");
+  assert.equal(record.relativeTime, "5d");
 });
 
 test("dedupeRecords merges longer text and engagement entities", () => {

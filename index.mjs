@@ -27,6 +27,7 @@ const DEFAULTS = {
   maxDetailPosts: 25,
   maxEngagementEntities: 200,
   headless: false,
+  resetSession: false,
 };
 
 function parseArgs(argv) {
@@ -34,7 +35,8 @@ function parseArgs(argv) {
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === "--") continue;
-    if (arg === "--headless") options.headless = true;
+    if (arg === "--reset-session") options.resetSession = true;
+    else if (arg === "--headless") options.headless = true;
     else if (arg === "--details") options.details = true;
     else if (arg === "--url") options.url = argv[++index];
     else if (arg === "--output") options.output = path.resolve(argv[++index]);
@@ -56,7 +58,7 @@ function parseArgs(argv) {
 }
 
 function printHelp() {
-  console.log(`LinkedIn feed exporter\n\nUsage:\n  node tools/linkedin-feed-exporter/index.mjs [options]\n\nOptions:\n  --url <url>                         Feed URL to collect (default: LinkedIn feed)\n  --output <directory>                Output directory (default: data/linkedin-feed/latest)\n  --profile-dir <directory>           Local Playwright profile directory\n  --max-posts <n>                     Stop after n unique posts (default: 100)\n  --max-scrolls <n>                   Maximum feed scrolls (default: 30)\n  --scroll-pause-ms <n>               Pause between scrolls (default: 1500)\n  --max-idle-scrolls <n>              Stop after no new posts for n scrolls (default: 4)\n  --details                          Open up to --max-detail-posts posts to collect visible dialog entities\n  --max-detail-posts <n>              Detail pages to enrich (default: 25)\n  --max-engagement-entities <n>       Cap comments/reactions captured per post (default: 200)\n  --headless                          Run headless; headed mode is the safe default\n  --help                              Show this help\n\nThe first run may require you to sign in manually in the opened browser. No credentials are read or stored by this script.\n`);
+  console.log(`LinkedIn feed exporter\n\nUsage:\n  node index.mjs [options]\n\nOptions:\n  --url <url>                         Feed URL to collect (default: LinkedIn feed)\n  --output <directory>                Output directory (default: data/linkedin-feed/latest)\n  --profile-dir <directory>           Local Playwright profile directory\n  --max-posts <n>                     Stop after n unique posts (default: 100)\n  --max-scrolls <n>                   Maximum feed scrolls (default: 30)\n  --scroll-pause-ms <n>               Pause between scrolls (default: 1500)\n  --max-idle-scrolls <n>              Stop after no new posts for n scrolls (default: 4)\n  --details                          Open up to --max-detail-posts posts to collect visible dialog entities\n  --max-detail-posts <n>              Detail pages to enrich (default: 25)\n  --max-engagement-entities <n>       Cap comments/reactions captured per post (default: 200)\n  --headless                          Run headless; headed mode is the safe default\n  --reset-session                     Delete the local browser profile and sign in again\n  --help                              Show this help\n\nThe browser profile at --profile-dir persists your LinkedIn session locally between runs. No credentials or cookies are uploaded by this script. Use --reset-session to clear it.\n`);
 }
 
 function now() {
@@ -145,9 +147,14 @@ async function extractFeedSnapshots(page) {
 
       return cards.map((card) => {
         const rawText = clean(card.innerText);
-        const postLinks = links(card).filter(({ href }) => /\/feed\/update\/|\/posts\//i.test(href));
-        const postUrl = postLinks[0]?.href || null;
-        const profileLinks = links(card).filter(({ href, text }) => /linkedin\.com\/(in|company)\//i.test(href) && text.length > 1);
+        const allLinks = links(card);
+        const domMarker = card.getAttribute("data-urn") || card.getAttribute("data-id") || "";
+        const urn = domMarker.match(/urn:li:(?:activity|share):\d+/i)?.[0] || null;
+        const markerUrl = urn ? `${location.origin}/feed/update/${urn}` : null;
+        const postUrlCandidates = [markerUrl, ...allLinks.map(({ href }) => toAbsolute(href))]
+          .filter((href) => href && /\/feed\/update\/urn:li:(?:activity|share):\d+|\/posts\/[^/?#]+-(?:activity|share)-\d+|\/posts\/[^/?#]+-\d{8,}|\/embed\//i.test(new URL(href).pathname));
+        const postUrl = postUrlCandidates[0] || null;
+        const profileLinks = allLinks.filter(({ href, text }) => /linkedin\.com\/(in|company)\//i.test(href) && text.length > 1);
         const authorLink = profileLinks.find(({ text }) => !/^follow|connect|message$/i.test(text)) || profileLinks[0] || {};
         const textElement = first(card, [
           'div[data-testid="expandable-text-box"]',
@@ -167,23 +174,31 @@ async function extractFeedSnapshots(page) {
           const match = rawText.match(pattern);
           return match ? { action, actor: clean(match[1].split("\n").pop()) || null } : found;
         }, { actor: null, action: null });
-        const timeElement = first(card, ["time", "span[aria-label*='ago' i]"]);
-        const jobLink = links(card).find(({ href, text }) => /\/jobs\/view\//i.test(href) || /view job|apply now/i.test(text));
+        const timeElement = first(card, ["time", "span[aria-label*='ago' i]", "span[aria-label*='today' i]", "span[aria-label*='yesterday' i]"]);
+        const engagementLabels = all(card, [
+          'button[aria-label*="reaction" i]',
+          'button[aria-label*="like" i]',
+          'button[aria-label*="comment" i]',
+          'button[aria-label*="repost" i]',
+          '[role="button"][aria-label*="reaction" i]',
+          '[role="button"][aria-label*="comment" i]',
+        ]).map((element) => clean(element.getAttribute("aria-label") || element.textContent));
+        const jobLink = allLinks.find(({ href, text }) => /\/jobs\/view\//i.test(href) || /view job|apply now/i.test(text));
         const jobTitle = clean(first(card, ['a[href*="/jobs/view/"]', 'a[href*="/jobs/"]'])?.textContent);
         const images = all(card, [
           'img[src*="feedshare"]',
           'img[srcset*="feedshare"]',
           'img[data-delayed-url*="feedshare"]',
         ]).map((image) => image.currentSrc || image.src || image.getAttribute("data-delayed-url"));
-        const reactions = rawText.match(/(\d[\d,.]*\s*[km]?)\s+(?:reactions?|likes?)/i)?.[1] || null;
-        const comments = rawText.match(/(\d[\d,.]*\s*[km]?)\s+comments?/i)?.[1] || null;
-        const reposts = rawText.match(/(\d[\d,.]*\s*[km]?)\s+(?:reposts?|re-shares?)/i)?.[1] || null;
+        const isPromoted = /\bPromoted\b/i.test(rawText);
 
         return {
-          postId: postUrl ? (postUrl.match(/(\d{8,})/)?.[1] || null) : null,
-          postUrl: toAbsolute(postUrl),
+          postId: null,
+          postUrl,
+          postUrlCandidates,
           text: commentary,
           rawText,
+          isPromoted,
           author: {
             name: authorLink.text || null,
             profileUrl: toAbsolute(authorLink.href),
@@ -191,13 +206,14 @@ async function extractFeedSnapshots(page) {
           },
           socialContext,
           relativeTime: clean(timeElement?.getAttribute("datetime") || timeElement?.getAttribute("aria-label") || timeElement?.textContent),
-          engagement: { reactions, comments, reposts },
+          engagementLabels,
+          engagement: {},
           imageUrls: dedupe(images.map(toAbsolute)),
-          hasVideo: Boolean(card.querySelector("video, [data-test-video]") ),
+          hasVideo: Boolean(card.querySelector("video, [data-test-video]")),
           hasDocument: Boolean(card.querySelector('a[href*="/document/"] img, [data-test-id*="document" i]')),
           hasPoll: Boolean(card.querySelector('[role="radio"], [data-test-id*="poll" i]')),
           job: jobLink ? { url: toAbsolute(jobLink.href), title: jobTitle || null } : null,
-          domMarker: card.getAttribute("data-urn") || card.getAttribute("data-id") || null,
+          domMarker: domMarker || null,
         };
       }).filter((snapshot) => snapshot.postUrl || snapshot.text || snapshot.job);
     });
@@ -282,6 +298,7 @@ async function enrichPost(page, record, options) {
 }
 
 async function collect(options) {
+  if (options.resetSession) await fs.rm(options.profileDir, { recursive: true, force: true });
   await ensureDir(options.output);
   await ensureDir(options.profileDir);
   const startedAt = now();
@@ -351,6 +368,9 @@ async function collect(options) {
     }
 
     const invalid = records.filter((record) => !record.postId && !record.postUrl);
+    const unresolvedUrls = records.filter((record) => record.postUrlStatus !== "verified");
+    coverage.verifiedPostUrls = records.length - unresolvedUrls.length;
+    coverage.unresolvedPostUrls = unresolvedUrls.length;
     if (invalid.length) coverage.gaps.push(`${invalid.length} records have no stable LinkedIn post URL or identifier.`);
     if (!records.length) coverage.gaps.push("No feed records were extracted; the page may not have been signed in, loaded, or accessible.");
     coverage.endedAt = now();
@@ -363,6 +383,9 @@ async function collect(options) {
       options: { ...options, profileDir: "[local-only]" },
       counts: {
         posts: exports.posts.length,
+        verifiedPostUrls: exports.posts.filter((post) => post.postUrlStatus === "verified").length,
+        unresolvedPostUrls: exports.posts.filter((post) => post.postUrlStatus !== "verified").length,
+        promotedCards: exports.posts.filter((post) => post.isPromoted).length,
         jobs: exports.jobs.length,
         authors: exports.authors.length,
         engagementRows: exports.engagement.length,
@@ -371,6 +394,8 @@ async function collect(options) {
       },
       notes: [
         "Records represent the data rendered to the signed-in user by the visible LinkedIn UI during this collection run.",
+        "postUrl and crossCheckUrl are populated only when a real post-shaped LinkedIn URL was visible in the card; unresolved cards are never assigned a fake /null or company-page URL.",
+        "The browser profile is persisted locally at the configured profileDir so the signed-in session can be reused; it is not uploaded or included in exports.",
         "The tool does not bypass access controls, call undocumented private endpoints, solve CAPTCHAs, or claim universal completeness.",
       ],
     };

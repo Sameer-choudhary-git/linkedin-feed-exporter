@@ -19,7 +19,7 @@ pnpm install
 pnpm export -- --max-posts 100 --max-scrolls 30
 ```
 
-The browser opens in a repository-local profile directory at `.local/linkedin-profile`. On the first run, sign in manually in that browser, open the feed you want to collect, and press Enter in the terminal. The profile directory is ignored by Git and is never included in the JSON output.
+The browser opens with a persistent local profile at `.local/linkedin-profile` by default. On the first run, sign in manually in that browser, open the feed you want to collect, and press Enter in the terminal. On later runs, the same browser profile reuses the saved LinkedIn session cookie, so you normally will not need to sign in again. The profile directory is ignored by Git and is never uploaded or included in the JSON output. If LinkedIn expires the session or you want to remove it, run `pnpm export -- --reset-session` and sign in again.
 
 For bounded detail enrichment:
 
@@ -27,7 +27,7 @@ For bounded detail enrichment:
 pnpm export -- --max-posts 50 --details --max-detail-posts 10 --max-engagement-entities 200
 ```
 
-Useful options include `--url` for a specific LinkedIn feed URL, `--output` for a different output directory, `--max-idle-scrolls` to stop when no new records appear, and `--headless` for environments where a visible browser is unavailable. Headed mode is recommended for normal use.
+Useful options include `--url` for a specific LinkedIn feed URL, `--output` for a different output directory, `--profile-dir` to choose where the persistent session is stored, `--reset-session` to clear it, `--max-idle-scrolls` to stop when no new records appear, and `--headless` for environments where a visible browser is unavailable. Headed mode is recommended for normal use.
 
 ## Output files
 
@@ -42,11 +42,11 @@ The exporter writes a manifest and separate datasets under `data/linkedin-feed/l
 | `authors.json` | Unique visible authors and the number of captured posts associated with each. |
 | `engagement.json` | Per-post reaction/comment counts plus any visible social context and enriched entities. |
 
-Each post includes the canonical post URL or best available identifier, text, author, social context, relative timestamp, visible engagement counts, media hints, job data where applicable, raw card text for auditability, and a `source` object describing the extraction mode and timestamp. Missing values remain `null` instead of being guessed.
+Each post includes `postUrl`, `crossCheckUrl`, and `postUrlStatus`. A URL is marked `verified` only when the DOM exposed a real post-shaped LinkedIn URL such as `/feed/update/urn:li:share:...` or a post URL containing a stable activity/share identifier. Company-page URLs, `/null`, profile URLs, and ad landing pages are never presented as post URLs. Cards for which LinkedIn does not expose a post URL remain in the export with `postUrlStatus: "unresolved"`, so the tool does not invent a link. When the card exposes a LinkedIn activity/share URN in its DOM attributes, the exporter constructs the corresponding `/feed/update/urn:li:...` cross-check URL. Each record also includes text, author, social context, relative timestamp, visible engagement counts, media hints, job data where applicable, raw card text for auditability, and a `source` object describing the extraction mode and timestamp. Missing values remain `null` instead of being guessed. Existing JSON files containing fake `/null` or company-page URLs cannot be repaired with certainty after the fact; re-run the collector to obtain verified links from the live DOM.
 
 ## Accuracy model
 
-The collector reports coverage instead of silently implying completeness. The manifest records the number of scrolls, visible cards, snapshots, unique posts, detail attempts, detail successes, and any gaps. Records without a stable URL or identifier are retained only when they have meaningful text, and the manifest calls them out.
+The collector reports coverage instead of silently implying completeness. The manifest records the number of scrolls, visible cards, snapshots, unique posts, verified post URLs, unresolved post URLs, promoted cards, detail attempts, detail successes, and any gaps. Records without a stable URL or identifier are retained only when they have meaningful text, and the manifest calls them out. The pasted-output regression cases are covered by tests for fake `/null` URLs, company-page URLs, promoted cards, degree suffixes, timestamps, and visible engagement labels.
 
 In feed-only mode, comments and reaction identities are populated only when LinkedIn already exposes them in the feed card. In `--details` mode, the tool tries to open the rendered post page and read visible dialog entities, but LinkedIn may paginate, hide, personalize, or restrict those entities. The tool records dialog capture counts and whether the configured cap was reached. Counts such as reactions and comments are preserved as displayed and are not inflated through estimation.
 
