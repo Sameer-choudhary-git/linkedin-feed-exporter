@@ -49,6 +49,7 @@ test("rejects fake, company-page, and unresolved URLs instead of presenting them
   assert.equal(canonicalizePostUrl("https://www.linkedin.com/null"), null);
   assert.equal(canonicalizePostUrl("https://www.linkedin.com/company/example/posts"), null);
   assert.equal(canonicalizePostUrl("https://www.linkedin.com/feed/update/urn:li:share:7494016921496031232"), "https://www.linkedin.com/feed/update/urn:li:share:7494016921496031232");
+  assert.equal(canonicalizePostUrl("https://www.linkedin.com/posts/example-author_activity-7494016921496031232"), "https://www.linkedin.com/posts/example-author_activity-7494016921496031232");
 
   const record = normalizeSnapshot({
     postUrl: "https://www.linkedin.com/company/example/posts",
