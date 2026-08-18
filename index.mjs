@@ -33,6 +33,7 @@ function parseArgs(argv) {
   const options = { ...DEFAULTS };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
+    if (arg === "--") continue;
     if (arg === "--headless") options.headless = true;
     else if (arg === "--details") options.details = true;
     else if (arg === "--url") options.url = argv[++index];
